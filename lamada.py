@@ -1,70 +1,137 @@
 import json
+import requests
 import boto3
 from datetime import datetime
 
-# 初始化DynamoDB客户端（指定你的AWS区域，如ap-southeast-2）
+DEEPSEEK_API_KEY = "sk-fbcc127b9f384ba6b25442642a9cc485"
+DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 dynamodb = boto3.resource('dynamodb', region_name='ap-southeast-2')
-# 关联到创建的表
 table = dynamodb.Table('ds-chat-bot-history')
 
 def lambda_handler(event, context):
-    # 从event中获取用户输入（后续通过API Gateway传递）
-    user_input = event.get("user_input", "")
-    session_id = event.get("session_id", "default-session")  # 建议前端生成唯一ID传入
+    try:
+        print(f"收到事件: {json.dumps(event)}")  # 打印完整事件
+        
+        # 解析请求体
+        if 'body' in event:
+            body = json.loads(event['body'])
+            user_input = body.get("user_input", "")
+            session_id = body.get("session_id", "default-session")
+        else:
+            user_input = event.get("user_input", "")
+            session_id = event.get("session_id", "default-session")
+        
+        print(f"用户输入: {user_input}")
+        print(f"会话ID: {session_id}")
+        
+        if not user_input:
+            return error_response(400, "user_input 不能为空")
+        
+        # 调用 DeepSeek API
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": user_input}],
+            "temperature": 0.7,
+            "max_tokens": 2048,
+            "stream": False
+        }
+        
+        print("开始调用DeepSeek API...")
+        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data, timeout=30)
+        
+        # 详细调试信息
+        print(f"API请求状态码: {response.status_code}")
+        print(f"API响应头: {dict(response.headers)}")
+        print(f"API原始响应: {response.text}")
+        
+        # 检查HTTP状态
+        if response.status_code != 200:
+            error_msg = f"DeepSeek API 请求失败: {response.status_code}"
+            print(error_msg)
+            return error_response(response.status_code, error_msg)
+        
+        # 尝试解析JSON
+        try:
+            response_data = response.json()
+            print(f"解析后的响应数据: {json.dumps(response_data, ensure_ascii=False)}")
+        except json.JSONDecodeError as e:
+            error_msg = f"响应JSON解析失败: {str(e)}"
+            print(error_msg)
+            return error_response(500, error_msg)
+        
+        # 检查响应结构
+        if "choices" in response_data and response_data["choices"]:
+            bot_response = response_data["choices"][0]["message"]["content"]
+            print(f"提取的回复内容: {bot_response}")
+        else:
+            error_info = response_data.get("error", {})
+            error_msg = error_info.get("message", "API返回了未知的响应结构")
+            print(f"API错误详情: {response_data}")
+            return error_response(500, f"AI服务响应异常: {error_msg}")
+        
+        # 存储到DynamoDB
+        store_chat_history(session_id, user_input, bot_response)
+        
+        # 返回成功响应
+        return success_response(bot_response, session_id)
+        
+    except requests.exceptions.Timeout:
+        error_msg = "DeepSeek API 请求超时"
+        print(error_msg)
+        return error_response(504, error_msg)
+    except requests.exceptions.ConnectionError:
+        error_msg = "无法连接到 DeepSeek API"
+        print(error_msg)
+        return error_response(503, error_msg)
+    except Exception as e:
+        error_msg = f"Lambda函数异常: {str(e)}"
+        print(error_msg)
+        return error_response(500, error_msg)
 
-    # 调用回复生成函数
-    response = generate_response(user_input)
-
-    store_chat_history(session_id, user_input, bot_response)
-
-    history = get_chat_history(session_id)
-    
-    # 返回JSON格式响应
-    result = {
+def success_response(bot_response, session_id):
+    return {
         "statusCode": 200,
         "headers": {
-            "Access-Control-Allow-Origin": "*",  # 生产环境替换为具体前端域名
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "POST",
-            "Access-Control-Allow-Credentials": "false"
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+            "Access-Control-Allow-Methods": "POST,OPTIONS"
         },
-        # "body": json.dumps({"response": response}, ensure_ascii=False)
-        "body": {"response": response}  
+        "body": json.dumps({
+            "response": bot_response,
+            "session_id": session_id,
+            "status": "success"
+        })
     }
-    # 可以在这里打印一下，方便控制台看
-    print("实际返回内容：", result)  
-    return result
 
-def generate_response(user_input):
-    # 这里放入你的回复逻辑（可替换为调用OpenAI等API）
-    if "你好" in user_input:
-        return "你好呀！有什么可以帮你的？"
-    elif "再见" in user_input:
-        return "再见~ 欢迎下次再来！"
-    else:
-        return "我不太明白你的意思，可以换个说法吗？"
+def error_response(status_code, message):
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+            "Access-Control-Allow-Methods": "POST,OPTIONS"
+        },
+        "body": json.dumps({
+            "error": message,
+            "status": "error"
+        })
+    }
 
-# 存储聊天记录到DynamoDB
 def store_chat_history(session_id, user_input, bot_response):
-    # 生成UTC时间戳（确保排序一致）
-    timestamp = datetime.utcnow().isoformat() + "Z"  # 格式：2024-08-24T12:34:56.789Z
-    
-    # 写入表中
-    table.put_item(
-        Item={
-            "session_id": session_id,  # 分区键
-            "timestamp": timestamp,    # 排序键（按时间排序）
-            "user_input": user_input,  # 用户输入
-            "bot_response": bot_response  # 机器人回复
-        }
-    )
-
-# （可选）查询会话历史记录
-def get_chat_history(session_id):
-    # 查询指定session_id的所有记录，并按时间戳升序排列
-    response = table.query(
-        KeyConditionExpression=boto3.dynamodb.conditions.Key('session_id').eq(session_id),
-        ScanIndexForward=True  # True=升序（旧→新），False=降序（新→旧）
-    )
-    # 返回查询到的记录（去掉DynamoDB内部字段）
-    return response.get('Items', [])
+    try:
+        timestamp = datetime.utcnow().isoformat() + "Z"
+        table.put_item(
+            Item={
+                "session_id": session_id,
+                "timestamp": timestamp,
+                "user_input": user_input,
+                "bot_response": bot_response
+            }
+        )
+        print("聊天记录存储成功")
+    except Exception as e:
+        print(f"存储聊天记录失败: {str(e)}")
