@@ -1,6 +1,6 @@
 # ds-chat-bot
 chat bot by aws infra
-
+（後続実際はDEEPSEEKを使います）理論は同じのため、修正はこれからです。ご理解ありがとうございます。
 
 草案
 方案設計：AWS サービスと ChatGPT API の連携（日本語版）
